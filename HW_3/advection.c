@@ -8,17 +8,21 @@ Approximating the advection operator by 1st order finite difference.
 # include <stdlib.h>
 # include <time.h>
 # include "advection.h"
-
+# include <omp.h>
+void InfNorm(mesh_t *msh, double *Q);
 #define BUFSIZE 512
 /* ************************************************************************** */
 int main ( int argc, char *argv[] ){
-  if(argc!=2){
-    printf("Usage: ./levelSet input.dat\n");
+  if(argc!=3){
+    printf("Usage: ./levelSet input.dat thread_number\n");
     return -1;  
   }
   static int frame=0;
+  float t0 = omp_get_wtime();
 
-  // Create an advection solver
+  int thread_count=strtol(argv[2],NULL,10);
+  printf("threadcount: %s\n",argv[2]);
+  omp_set_num_threads(thread_count);
   solver_t advc; 
   // Create uniform rectangular (Cartesian) mesh
   advc.msh = createMesh(argv[1]); 
@@ -51,11 +55,12 @@ int main ( int argc, char *argv[] ){
 
   // ********************Time integration***************************************/
   // for every steps
+
   for(int step = 0; step<Nsteps; step++){
     // for every stage
     for(int stage=0; stage<tstep.Nstage; stage++){
       // Call integration function
-      RhsQ(&advc, &tstep, stage); 
+      RhsQ(&advc, &tstep, stage);
     }
 
     tstep.time = tstep.time+tstep.dt;
@@ -64,16 +69,77 @@ int main ( int argc, char *argv[] ){
       char fname[BUFSIZ];
       sprintf(fname, "test_%04d.csv", frame++);
       solverPlot(fname, &advc.msh, advc.q);
+      InfNorm(&advc.msh, advc.q);
     }
   }
+  float t1 = omp_get_wtime();
+  printf("parallel for shared took: %lf\n", t1-t0);
 }
+
+
+////////////////////////////////////////////
+
+void InfNorm(mesh_t *msh, double *Q){
+  double max1=0,max2=0,max3=0,max4=0,local_max5=0,max5=0;
+  double t1=omp_get_wtime();
+  for(int n=0; n+1< msh->Nnodes; n++){
+      if (fabs(Q[n+1])>=max1){
+        max1 = Q[n+1];
+        }
+      }
+  printf("Max1:%.8f\n",max1);
+  double t2=omp_get_wtime();
+  printf("The time with no parallelization:%f\n",t2-t1);
+  double t3=omp_get_wtime();   
+  #pragma omp parallel for 
+  for(int ii=0; ii< msh->Nnodes-1; ii++){
+    if (fabs(Q[ii+1])>=max2){
+        max2 = Q[ii+1];
+        }
+      }
+  printf("Max2:%.8f\n",max2);
+  double t4=omp_get_wtime();,
+  printf("The time with only parallel for:%f\n",t4-t3);
+  double t5=omp_get_wtime();
+  #pragma omp parallel for 
+    for(int n=0; n< msh->Nnodes-1; n++){
+  #pragma omp critical
+      {
+        if (fabs(Q[n+1])>=max3){
+        max3 = Q[n+1];
+        }
+      }
+      }
+    
+  printf("Max3:%.8f\n",max3);
+  double t6=omp_get_wtime(); 
+  printf("The time with critical:%f\n",t6-t5);
+     double t9=omp_get_wtime();  
+    #pragma omp parallel for reduction(max:local_max5)
+    for(int n = 0;n < msh->Nnodes-1; n++) {
+    if (fabs(Q[n+1]) >= local_max5) {
+      local_max5 = Q[n+1];
+    }
+  }
+  printf("Max4:%.8f\n",local_max5);
+  double t10=omp_get_wtime();
+  printf("The time with reduction%f\n",t10-t9);
+    #pragma omp critical
+  {
+    if (local_max5 > max5) {
+      max5= local_max5;
+    }
+  }
+     //printf("The time with no parallelization:%f\n",t10-t9);
+  }
+
 
 
 
 /* ************************************************************************** */
 void RhsQ(solver_t *solver, tstep_t *tstep, int stage){
-
 mesh_t *msh = &solver->msh;
+#pragma omp parallel for default(none) shared(solver,msh,tstep,stage)
 for(int j=0; j<msh->NY; j++){
     for(int i=0; i<msh->NX; i++){
       const int idn = j*msh->NX + i; 
@@ -102,18 +168,20 @@ for(int j=0; j<msh->NY; j++){
       double dfqdy = uny> 0 ? (uny*solver->q[idn]- uyS*solver->q[elmS])/hjm1 :  (uyN*solver->q[elmN]- uny*solver->q[idn])/hjp1;
 
       double rhsq   = -(dfqdx +dfqdy);
+      // Time integration i.e. resq = rk4a(stage)* resq + dt*rhsq//
 
-      // Time integration i.e. resq = rk4a(stage)* resq + dt*rhsq
-      double resq = tstep->rk4a[stage]*tstep->resq[idn] + tstep->dt*rhsq; 
+      double resq = tstep->rk4a[stage]*tstep->resq[idn] + tstep->dt*rhsq;
       // Update q i.e. q = q 6 rk4b(stage)*resq
-      solver->q[idn]  +=  tstep->rk4b[stage]*resq;
-
+     
+      {
+        solver->q[idn]  +=  tstep->rk4b[stage]*resq;
       tstep->resq[idn] = resq; 
       tstep->rhsq[idn] = rhsq; 
-    }
-  }
-}
-
+      }
+          }
+           }
+          } 
+      
 /* ************************************************************************** */
 void initialCondition(solver_t *solver){
   mesh_t *msh = &(solver->msh); 
@@ -246,10 +314,18 @@ void solverPlot(char *fileName, mesh_t *msh, double *Q){
     }
 
     fprintf(fp, "X,Y,Z,Q \n");
+    float max;
     for(int n=0; n< msh->Nnodes; n++){
       fprintf(fp, "%.8f, %.8f,%.8f,%.8f\n", msh->x[n], msh->y[n], 0.0, Q[n]);
     } 
-}
+    for(int n=0; n+1< msh->Nnodes; n++){
+      if (Q[n+1]>= Q[n]){
+        max = Q[n+1];
+        }
+      }
+    fprintf(fp,"Maximum value is:%.8f",max);
+  }
+
 
 /* ************************************************************************** */
 double readInputFile(char *fileName, char* tag){
