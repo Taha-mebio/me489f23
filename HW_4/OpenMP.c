@@ -29,7 +29,7 @@ int main ( int argc, char *argv[] ){
   MPI_Init ( &argc, &argv );
   MPI_Comm_rank ( MPI_COMM_WORLD, &rank );
   MPI_Comm_size ( MPI_COMM_WORLD, &size );
-
+  omp_set_num_threads(size);
   // get number of nodes per processor
   int N = strtol(argv[1], NULL, 10);
 
@@ -75,7 +75,7 @@ void runSolver( int n, int rank, int size ){
   double dt  = cfl*dx*dx/k; 
   int Nsteps = ceil(( tend - tstart )/dt);
   dt =  ( tend - tstart )/(( double )(Nsteps)); 
-  printf("dt : % lf", dt);
+  printf("dt : % lf\n", dt);
 
   int tag = 0;
   MPI_Status status;
@@ -98,14 +98,14 @@ void runSolver( int n, int rank, int size ){
   // In single processor mode
   if (size == 1 && OUT==1){
     // write out the x coordinates for display.
-    xfile = fopen ( "x_data.txt", "w" );
+    xfile = fopen ( "x_data1.txt", "w" );
     for (int i = 1; i<(n+1); i++ ){
       fprintf ( xfile, "  %f", x[i] );
     }
     fprintf ( xfile, "\n" );
     fclose ( xfile );
     // write out the initial solution for display.
-    qfile = fopen ( "q_data.txt", "w" );
+    qfile = fopen ( "q_data1.txt", "w" );
     for ( int i = 1; i <= n; i++ ){
       fprintf ( qfile, "  %f", q[i] );
     }
@@ -170,6 +170,7 @@ void runSolver( int n, int rank, int size ){
 
   // Update time and field.
     time = time_new;
+    #pragma omp parallel for
     // For OpenMP make this loop parallel also
     for ( int i = 1; i <= n; i++ ){
       q[i] = qn[i];
