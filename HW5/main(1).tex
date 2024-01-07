@@ -1,0 +1,185 @@
+\documentclass{article}
+
+% Language setting
+% Replace `english' with e.g. `spanish' to change the document language
+\usepackage[english]{babel}
+\usepackage{minted}
+
+\usepackage[utf8]{inputenc}
+\usepackage{array}
+\usepackage{float}
+
+\usepackage[letterpaper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+
+% Useful packages
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+
+\title{ME-489 HOMEWORK 5 REPORT}
+\author{Alperen Çalışkan & Ali Taha Akpınar}
+
+\begin{document}
+\definecolor{mygray}{rgb}{0.95,0.95,0.95}
+\setminted[c]{autogobble=true, frame=lines, framesep=4mm, baselinestretch=1.2,
+bgcolor=mygray, fontsize=\footnotesize,linenos=true}
+\setminted[latex]{autogobble=true, frame=lines, framesep=4mm, baselinestretch=1.2,
+bgcolor=mygray, fontsize=\footnotesize,linenos=true}
+\maketitle
+\begin{abstract}
+This report is a documentation of the Homework 5 of ME-489 course. The main problem is to parallelize the explicit in-time 2D Finite Difference Solver using the serial code provided by the course instructor. MPI is to be used in order to provide a more effecient code. The wave equation is given as:
+\begin{equation}
+\frac{\partial^2 q}{\partial t^2} = c^2 \left( \frac{\partial^2 q}{\partial x^2} + \frac{\partial^2 q}{\partial y^2} \right), \quad 0 \leq x \leq 1, \quad 0 \leq y \leq 1
+\end{equation}
+It is similar to what was asked in the prior Homeworks. The change in field variable is provided as an equation in the Homework. The serial implementation provides a general understanding and the serial code is changed in order to divide the topology in the y direction by the number of rank size.
+\end{abstract}
+
+\section{Introduction}
+The example code is downloaded and copied. After that the code is divided in the y direction where each rank calculates the respective amount of node fields. MPI communication is used where neighbouring field variable of the nodes are to be shared. The boundaries are changed for every node and the infinity norm of error is calculated. THe details are explained in the following sections.
+
+\section{Domain Decomposition}
+The domain is divided into the given number of rank size as mentioned earlier. It is assumed that the number of points in the y direction is divisible by the number of rank size. MPI is initialized in the int main, the rank and size of the paralleled code is obtain. "local" number of x and y values of the points are written.
+\subsection{Boundary Conditions}
+The boundary conditions were changed in order to be suitable with the ranks. The most left and right side of the mesh was unchanged since all the ranks must have left and right boundaries. Unlike the left and right sides, only the very first and the very last ranks must have boundary conditions on the bottom and top respectively. That is why it is changed by if statements as below:
+\begin{minted}{c}
+for(int i=0; i< nx; ++i){
+  if(rank==0){ // top and  bottom boundaries i.e. j=0 and j=ny-1
+    xn = x[i+ 0*nx]; 
+    yn = y[i+ 0*nx]; 
+    data[i + nx] = exactSoln(c, xn, yn, time); 
+    }
+  if(rank==size-1){
+    xn = x[i+ (ny-1)*nx]; 
+    yn = y[i+ (ny-1)*nx];       
+    data[i +  (ny)*nx] = exactSoln(c, xn, yn, time);
+    } 
+  }
+\end{minted}
+Above code fills the bottom nodes of the rank 0 and the top nodes of the rank = size-1 with the correct Boundary field values. The reason for filling the second bottom and second top nodes will be clear later on.
+\subsection{Holding the Neighbouring Node values}
+The field values of the neighbouring nodes for the top and bottom nodes are hold in an extra space allocated in the q0. For that reason the memory space is of size nx * (ny +2). 
+\begin{minted}{c}
+    // Solution at time (t)
+  q0 = ( double * ) malloc ( nx*(ny+2) * sizeof ( double ) );
+\end{minted}
+Because of those extra lines many of the for loops are changed where the field solution is held from nodes with j = 1 to node with j = 2 and from nodes with j = ny - 2 to node with j = ny - 1. 
+Serial code:
+\begin{minted}{c}
+for(int i=0; i<nx; i++){
+      for(int j=1; j<ny; j++){
+      const double xn = x[i+ j*nx]; 
+      const double yn = y[i+ j*nx]; 
+      // Exact solutions at history tstart and tstart+dt
+      q0[i + j*nx] = exactSoln(c, xn, yn, tstart + dt);  
+      q1[i + j*nx] = exactSoln(c, xn, yn, tstart);  
+    }
+  }   
+\end{minted}
+MPI code:
+\begin{minted}{c}
+for(int i=0; i<nx; i++){
+      for(int j=1; j<ny+1; j++){
+      const double xn = x[i+ j*nx]; 
+      const double yn = y[i+ j*nx]; 
+      // Exact solutions at history tstart and tstart+dt
+      q0[i + (j+1)*nx] = exactSoln(c, xn, yn, tstart + dt);  
+      q1[i + (j+1)*nx] = exactSoln(c, xn, yn, tstart);  
+    }
+  }
+\end{minted}
+\section{MPI Communication}
+The Messaging is done as follows:
+\begin{minted}{c}
+for(int i=1; i<nx-1; i++){
+      if(rank>0){
+      MPI_Send(&q0[i+nx],1,MPI_DOUBLE,rank-1,1,MPI_COMM_WORLD);}
+      if(rank<size-1){
+      MPI_Recv(&q0[i+(ny+1)*nx],1,MPI_DOUBLE,rank+1,1,MPI_COMM_WORLD,&status);}
+      if(rank<size-1){
+      MPI_Send(&q0[i+ny*nx],1,MPI_DOUBLE,rank+1,2,MPI_COMM_WORLD);}
+      if(rank>0){
+      MPI_Recv(&q0[i],1,MPI_DOUBLE,rank-1,2,MPI_COMM_WORLD,&status);}
+      }
+\end{minted}
+The top and bottom field values are send to the locations of rank+1 and rank-1. Similarly the messages are received for the bottom and top values from rank-1 and rank+1 respectively.
+\section{Updating the Solution}
+When the solution was updated in the serial code it only updates the internal nodes since the boundary nodes are calculated using the applyBC function. Tricky part is that when the code is used as it is the internal nodes connecting one rank to another are treated as boundary nodes and are not calculated(i.e. for any rank in the middle, ny - 2 rows of nodes will be updated). The code is changed in a way that for any rank excluding the 0'th and last ranks, ny amount of rows of nodes are updated and ny - 1 amount of rows of nodes are updated for 0'th and last ranks. Below is how it is done for the middle ranks.
+\begin{minted}{c}
+    if(0<rank && rank<size-1){
+      for(int i=1; i<nx-1; i++){ // exclude left right boundaries
+        for(int j=1; j<ny+1 ; j++){ // exclude top and bottom boundaries
+          int n0   = i + j*nx; 
+          int nim1 = i - 1 + j*nx; // node i-1,j
+          int nip1 = i + 1 + j*nx; // node i+1,j
+          int njm1 = i + (j-1)*nx; // node i, j-1
+          int njp1 = i + (j+1)*nx; // node i, j+1
+            
+          // update solution 
+          qn[n0] = 2.0*q0[n0] - q1[n0] + alphax2*(q0[nip1]- 2.0*q0[n0] + q0[nim1])
+                                      + alphay2*(q0[njp1] -2.0*q0[n0] + q0[njm1]); 
+          }
+      }
+    }
+\end{minted}
+All ranks produce a csv file one by one using the following code piece:
+\begin{minted}{c}
+        // Dampout a csv file for postprocessing
+    if(tstep%Noutput == 0){ 
+      char fname[BUFSIZ];
+      if(rank==0){
+      sprintf(fname, "test_%04d1.csv", frame++);
+      solverPlot(fname, x, y, nx, ny, q0);}
+      if(rank==1){
+      sprintf(fname, "test_%04d2.csv", frame++);
+      solverPlot(fname, x, y, nx, ny, q0);}
+       if(rank==2){
+      sprintf(fname, "test_%04d3.csv", frame++);
+      solverPlot(fname, x, y, nx, ny, q0);}
+       if(rank==3){
+      sprintf(fname, "test_%04d4.csv", frame++);
+      solverPlot(fname, x, y, nx, ny, q0);}
+    }
+\end{minted}
+\section{Scaling}
+Keeping the processor numbers fixed and increasing the mesh size, the weak scaling results are obtained while similarly the strong scaling is obtained by keeping the mesh size fixed and gradually increasing the amount of processors. The obtained results are tabulated below:
+\begin{table}[H]
+        \centering
+        \scalebox{1.2}{
+        \renewcommand{\arraystretch}{2}
+        \begin{tabular}{m{2cm}|m{4cm}m{4cm}m{3cm}}
+        \hline
+        Processor Amount/Mesh Size & 1  & 2 & 4\\
+        \hline
+        \hline
+        51*51 Nodes & 3.52373 seconds & 3.60912 seconds & 3.75186 seconds\\
+        101*101 Nodes & 13.34006 seconds & 10.59050 seconds & 9.58780 seconds \\
+        201*201 Nodes & 60.48238 seconds & 30.84520 seconds & 27.16850 seconds \\ 401*401 Nodes& 241.0 seconds & 129.97 seconds & 91.60570 seconds\\
+        \end{tabular}}
+        \caption{Run time for each configuration}
+        \label{tab:First_Table}
+    \end{table}
+
+    
+    \begin{table}[H]
+        \centering
+        \scalebox{1.2}{
+        \renewcommand{\arraystretch}{2}
+        \begin{tabular}{m{2cm}|m{4cm}m{4cm}m{3cm}}
+        \hline
+        Processor Amount/Mesh Size & 1  & 2 & 4\\
+        \hline
+        \hline
+        51*51 Nodes & $3.3267 * 10^{-3}$ & $2.6264 * 10^{-1}$ & $4.3703 * 10^{-1}$\\
+        101*101 Nodes & $8.9262 * 10^{-4}$ & $2.3654 * 10^{-1}$ & $3.6375 * 10^{-1}$\\
+        201*201 Nodes & $3.2277 * 10^{-4}$ & $9.4317 * 10^{-1}$ & $7.3167 * 10^{-1}$\\ 401*401 Nodes& $2.1765 * 10^{-4}$ & $7.1085 * 10^{-1}$ & $4.5226 $\\
+        \end{tabular}}
+        \caption{Infinity norm of error for each configuration}
+        \label{tab:First_Table}
+    \end{table}
+\newpage
+\section{Discussion}
+Firstly the infinity norm of error results obtained are not within the safe range for most of the cases, indicating a mistake in the code. The field variable differences obtained from the serial and parallelized code yield within $10^{-5} range$ for the first couple of time steps indicating a cumulative error within time. \\
+\\The infinity norm of error becomes 0 when it is done with 401x401 nodes with 4 processes. This is especially a suspicious result stating that there may be a mistake since the smaller meshes yield more infinity norm of error. Only one csv file couldn't be achieved, that is why multiple smaller csv files are written, each of them by another rank as a solution.\\
+\\It was visible that as the mesh size increased the efficiency of the multi-processor code was increased and the run time decreased significantly. It is seen that as the number of processors increased, the infinity norm of error increased. This indicates that the code increases the error with each processor added.
+The time computed for one process is obtained by adding time functions to the serial code added to the homework file.
+\end{document}
